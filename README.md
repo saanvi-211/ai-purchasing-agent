@@ -35,18 +35,35 @@ Run the evaluation suite from the CLI:
 npm run evaluate
 ```
 
-**LLM configuration (optional).** The demo works fully without any API key: a deterministic
-rule-based brain runs the identical investigate → decide → act → validate loop. To use an LLM
+**LLM configuration (optional).** The agent runs fully without any API key: a deterministic
+rule-based brain performs the identical investigate → decide → act → validate loop. To use an LLM
 instead, copy `.env.example` to `.env`, set `OPENAI_API_KEY` (and optionally `OPENAI_BASE_URL`
 and `OPENAI_MODEL` — any OpenAI-compatible provider works), restart, and pick the `llm` brain in
-the UI. In `auto` mode the LLM brain is used when configured.
+the UI. In `auto` mode the LLM brain is used when configured. All required environment variables
+are documented in `.env.example`; no secrets are committed to the repository.
 
-Docker:
+## Working demo
+
+Run it in 60 seconds:
 
 ```bash
-docker build -t purchasing-agent .
-docker run -p 8080:8080 purchasing-agent
+npm install
+npm run start     # open http://localhost:8080
 ```
+
+Then in the UI:
+
+1. **Workspace tab** → click **Scenario 1** in the left rail.
+2. Watch the **agent trace** live: the tool calls it makes (coverage projection, sales history,
+   open POs), the factors it weighs, the order it creates, and the post-write verification.
+3. The **decision record** appears with the headline, quantified factors, actions taken and
+   validation summary — in Scenario 1, the 800-unit recommendation is **modified down to 250
+   units** and a PO is created for buyer approval.
+4. The new PO lands in the **Approval inbox** — approve or reject it as the buyer.
+5. Open the **Evaluation tab** and click **Run evaluation** — 9 test scenarios with per-case
+   scoring, or run `npm run evaluate` from the CLI.
+
+Docker: `docker build -t purchasing-agent . && docker run -p 8080:8080 purchasing-agent`
 
 ## The demo
 
@@ -169,6 +186,48 @@ The **coverage simulator** (`server/simulate.js`) projects stock day-by-day acro
 which gives every stage — recommendation review, what-if simulation, validation, and outcome
 verification — one shared, numeric definition of "is this plan actually good".
 
+## Approach: breaking down the problem
+
+The brief is deliberately ambiguous ("help a purchasing agent"). I broke it down as follows:
+
+1. **What is the buyer's actual job?** Not answering questions — deciding whether/what/when to
+   order, executing those orders in company systems, and being accountable for the outcome. So the
+   deliverable is an agent that *acts*, not a chatbot.
+2. **What information matters for one purchasing decision?** Demand (forecast + recent actuals),
+   current coverage (on-hand − reservations + inbound vs demand, relative to safety stock),
+   supplier terms (MOQ, capacity, lead time vs stockout date, price, reliability), budget headroom,
+   and storage headroom. These became the agent's read tools.
+3. **Where can an autonomous agent go wrong?** Trusting the incoming recommendation blindly,
+   over-reacting to noise (one-day sales spikes), duplicating incoming supply, violating budget /
+   storage / MOQ constraints, and repeating failed actions. Each failure mode got a specific
+   countermeasure: hypothesis-testing the recommendation, sustained-lift evidence rules, duplicate
+   guards, an independent validation gate, and adaptive retry.
+4. **What does "acceptable" mean, arithmetically?** The coverage simulator — stock projected
+   day-by-day across the horizon against safety stock — is the single shared definition used by the
+   recommendation review, the what-if tool, the validation gate and the outcome verification.
+5. **When should a human stay in the loop?** When the agent lacks authority (approval threshold)
+   or when constraints genuinely cannot be satisfied (escalation with a concrete proposed plan) —
+   rather than forcing a bad action.
+
+## Supporting services and mock data
+
+Everything needed to run the application is inside the repository — there are no external
+dependencies beyond Node.js:
+
+- **Mock ERP** (`server/seed.js`, `server/store.js`): products, on-hand/reserved inventory,
+  safety stock, 28 days of daily sales (actual vs forecast), demand forecasts, three suppliers with
+  differing lead times / MOQs / prices / reliability, open purchase orders, a monthly purchasing
+  budget, and warehouse storage capacity. Seeded deterministically; each scenario run rebuilds it
+  from scratch, so runs are repeatable.
+- **Mock agent-facing API** (REST + SSE, `server/index.js`): `GET /api/state`,
+  `GET /api/scenarios`, `POST /api/agent/run` (streams the agent's trace events),
+  `GET /api/evaluation/run`, `POST /api/approvals/:poId/:action` — the same endpoints the UI uses.
+- **Simulated system events**: incoming recommendations, supplier shortfall messages and demand
+  alerts, which the agent must interpret and act on.
+
+In a real deployment, the store layer is the single swap point for a database, and the tool layer
+is where real ERP APIs would plug in.
+
 ## Evaluation approach
 
 `npm run evaluate` (or the Evaluation tab) runs **9 test scenarios** against the deterministic
@@ -233,10 +292,42 @@ src/                  React dashboard (scenarios, live trace, decisions, approva
 - **Traceability.** Every run streams a complete trace — tool calls, rejections, verifications —
   which doubles as the audit log for the buyer.
 
-## Future work (beyond the assignment scope)
+## Additional buyer problems the same agent / architecture can solve
 
-- Approval gating for large *modifications* (currently only new POs above the threshold).
-- Supplier reliability scores influencing sourcing preference and PO follow-ups (chase late deliveries).
-- Promotion-aware forecasting and seasonal profiles feeding the coverage simulator.
-- Multi-node inventory (the current warehouse is a single pool).
-- Streaming the LLM brain's raw reasoning alongside the structured trace.
+The same tool layer, validation gate and feedback loop extend to neighbouring buyer problems
+demonstrated here in embryo, and solved in full with more data:
+
+- **Open purchase order follow-ups** — the agent already reads open POs; with delivery-status
+  events it can chase late deliveries and re-plan around them (the shortfall scenario is the same
+  mechanism).
+- **Supplier reliability** — reliability scores are already in the data model and used in
+  sourcing order; with a delivery history it can penalise late suppliers and split orders to hedge.
+- **Alternate suppliers** — sourcing already switches suppliers when the primary is blocked or
+  misses the stockout date (Scenario 2 and the recovery evaluation case); a wider supplier list
+  makes this a general capability.
+- **Promotional buying** — promotion calendars are just another demand modifier feeding the
+  coverage simulator, the same slot where the demand-surge evidence rule sits.
+- **Forecast anomalies** — the sustained-lift vs one-day-anomaly evidence rule (Scenario 3) is a
+  general forecast-anomaly detector; thresholds could be per-SKU.
+- **Replenishment and safety stock** — the core loop already computes replenishment quantities to
+  a safety-stock target; per-SKU service levels would make safety stock dynamic.
+- **Seasonal demand** — seasonal profiles are demand curves over the same horizon; the simulator
+  needs no structural change, only per-day demand instead of flat per-day demand.
+- **Approval workflow expansion** — approving large *modifications*, and approval queues with
+  multiple buyers, reuse the same human-in-the-loop path.
+
+## Assignment coverage map
+
+| Submission requirement | Where |
+|------------------------|-------|
+| Complete source code | this repository (`server/`, `src/`, configs) |
+| README with setup and run instructions | [Quick start](#quick-start) |
+| Working demo | [Working demo](#working-demo) |
+| Architecture diagram | [Architecture](#architecture) (Mermaid) |
+| Description of approach | [Approach: breaking down the problem](#approach-breaking-down-the-problem) |
+| Test scenarios and evaluation approach | [Scenarios implemented](#scenarios-implemented), [Evaluation approach](#evaluation-approach) |
+| Mock APIs, datasets, supporting services | [Supporting services and mock data](#supporting-services-and-mock-data) |
+| How the agent's decisions are validated | [The feedback / validation loop](#the-feedback--validation-loop-the-core-of-the-design) |
+| .env.example for required variables | `.env.example` (documented in [Quick start](#quick-start)) |
+| No secrets committed | `.env` is gitignored; `.env.example` contains only empty variables |
+| Intact Git commit history | full history preserved in this repository |
