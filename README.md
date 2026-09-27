@@ -346,7 +346,3 @@ demonstrated here in embryo, and solved in full with more data:
 **Saanvi Sarraf** — [saanvi.sarraf.ug22@nsut.ac.in](mailto:saanvi.sarraf.ug22@nsut.ac.in) · [GitHub](https://github.com/saanvi-211) · [LinkedIn](https://linkedin.com/in/saanvi-sarraf-4a3503263) · [Portfolio](https://saanvisarraf.netlify.app)
 
 ---
-
-## Contact
-
-**Saanvi Sarraf** — [saanvi.sarraf.ug22@nsut.ac.in](mailto:saanvi.sarraf.ug22@nsut.ac.in) · [GitHub](https://github.com/saanvi-211) · [LinkedIn](https://linkedin.com/in/saanvi-sarraf-4a3503263) · [Portfolio](https://saanvisarraf.netlify.app)
