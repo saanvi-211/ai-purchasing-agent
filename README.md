@@ -97,6 +97,90 @@ Inbox**, where the buyer can approve or reject them — the human-in-the-loop pa
 Every scenario run starts from a fresh, deterministic mock ERP, so runs are repeatable and the
 evaluation suite is stable.
 
+## Scenario walkthroughs (from an actual run)
+
+The table above is the summary; this is what each scenario actually does step by step, with the
+real numbers a live run produced against `SKU-COFFEE-1L` (Cold Brew Coffee 1L).
+
+### Scenario 1 — Purchase Recommendation Review
+
+The system hands the agent a recommendation of 800 units and nothing else — the assignment's
+explicit premise is that this number should not be trusted blindly.
+
+1. `get_product_overview` returns everything needed in one call: on-hand 220, reserved 20, safety
+   stock 150, a 45/day demand forecast over a 14-day horizon, and one open PO already inbound
+   (400 units, arriving in 5 days).
+2. The coverage simulator projects the 14-day horizon and finds an **actual gap of 180 units** —
+   the true stockout-day-14 gap — not 800.
+3. `get_sales_history` checks the last 7 days of actuals against forecast (45 vs 45, 0% trend) to
+   confirm demand itself hasn't shifted, so the only problem is the recommended quantity.
+4. Decision: **MODIFY**. A PO for 250 units (rounded up to the supplier's MOQ rather than the raw
+   180-unit gap) is created against NordicRoast Foods.
+5. Validation: budget available $9,370 vs a $3,000 order (pass), storage projected to peak at
+   1,970/3,000 (pass).
+6. Post-write verification re-reads PO-1100 and confirms quantity, supplier, budget and storage are
+   all still consistent, and that the projected stockout is gone.
+7. Because $3,000 is above the ~$2,500 approval line, the PO is created as `pending_approval` and
+   appears in the Approval Inbox rather than auto-executing.
+
+### Scenario 2 — Supplier Cannot Fulfil
+
+Here a PO already exists and the supplier has just reported a shortfall — the agent's job is to
+work out whether that shortfall actually matters before reacting.
+
+1. Coverage is re-derived the same way as Scenario 1, this time accounting for the partial delivery
+   already received.
+2. Existing inventory alone doesn't close the resulting gap, so the agent decides supply is genuinely
+   needed — not just noise it can absorb.
+3. It selects a supplier that can deliver **before the projected stockout day** (not simply the
+   cheapest option) and creates a replacement PO: 300 units, $3,600, from NordicRoast Foods.
+4. Same validation → post-write verification pattern as Scenario 1; the projected stockout clears.
+5. $3,600 also clears the approval threshold, so this PO lands in the Approval Inbox too.
+6. The evaluation suite's `S2c` edge case is what actually proves the retry logic: the first-choice
+   supplier is deliberately blocked, the validator rejects the attempt, and the agent has to read
+   the rejection reason and pick a different supplier rather than repeating the same call or giving up.
+
+### Scenario 3 — Demand / Forecast Has Changed
+
+The assignment explicitly warns against over-reacting to noise here, so the evidence check comes
+before anything else.
+
+1. `get_sales_history` pulls the last 7 days day-by-day against forecast, not just a single average.
+2. In this run, **all 7 of the last 7 days** were running above 1.2× forecast (7-day average 69/day
+   vs. a 45/day forecast — a +53% sustained lift), clearing the rule brain's ≥3-of-7-days bar for
+   treating this as real rather than a one-day spike.
+3. Only once that evidence threshold is met does the agent re-plan at the new 72/day run-rate.
+4. It **modifies the existing PO-1042** from 400 units to 958 units, rather than creating a
+   duplicate new order — the open-PO check prevents double-ordering into the same shortfall.
+5. Post-write verification confirms no stockout at the new demand level (end stock projected at 528
+   units).
+6. **Known limitation:** this modification is worth roughly $11,496 in added order value — larger
+   than either of the two `create_purchase_order` cases above that triggered the approval inbox —
+   but it did not require approval in this run. The approval-threshold check currently appears to be
+   wired only to `create_purchase_order`, not `modify_purchase_order`. This is a real gap worth
+   naming directly in the evaluation discussion rather than leaving for a reviewer to catch.
+
+### Scenario 4 — Purchasing Constraint
+
+This scenario is where the adaptive-retry loop is visible in a live run, not only in the evaluation
+suite.
+
+1. The agent confirms the same ~180-unit coverage gap using the same coverage math as every other
+   scenario, and is handed a recommendation of 400 units.
+2. This time budget is nearly exhausted ($1,800 available) and storage headroom is tight (230 units).
+3. First attempt: 180 units from Supplier B — **rejected** by the validation gate
+   (`budget_exceeded`: order value $2,268 vs. $1,800 available).
+4. Second attempt: 180 units from Supplier C — **rejected again** (`budget_exceeded`: $2,538 vs.
+   $1,800 available). The agent does not repeat the same quantity unchanged; it now knows the
+   binding constraint is budget, not supplier choice.
+5. Third attempt: 127 units from Supplier C — **passes** validation and is executed as PO-1100
+   (confirmed, not `pending_approval`, since its ~$1,524 value falls under the approval line).
+6. Post-write verification confirms the PO, and a fresh coverage projection shows no stockout, but
+   stock does dip below safety stock on day 4 (ending at 97 units) — a residual gap of 53 units.
+7. The agent calls `escalate_to_human` with a concrete proposed plan: release ~$747 of budget (or
+   free up storage) to order the remaining 53 units, and consider a faster supplier if the
+   stockout date gets closer.
+
 ## Architecture
 
 ```mermaid
@@ -344,5 +428,3 @@ demonstrated here in embryo, and solved in full with more data:
 ## Contact
 
 **Saanvi Sarraf** — [saanvi.sarraf.ug22@nsut.ac.in](mailto:saanvi.sarraf.ug22@nsut.ac.in) · [GitHub](https://github.com/saanvi-211) · [LinkedIn](https://linkedin.com/in/saanvi-sarraf-4a3503263) · [Portfolio](https://saanvisarraf.netlify.app)
-
----
